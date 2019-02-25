@@ -1,0 +1,579 @@
+---
+title: "Term Project"
+author: "Mary McClain, Josh Mark"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = F, message = F)
+```
+
+
+```{r libraries}
+library(tidyverse)
+library(caret) 
+library(glmnet)
+library(caTools)
+library(rpart.plot)
+library(RColorBrewer)
+library(rattle)
+library(rpart)
+library(Cubist)
+library(gbm)
+library(ipred)
+library(party)
+library(partykit)
+library(randomForest)
+library(rpart)
+library(Metrics)
+library(caretEnsemble)
+library(doParallel)
+```
+
+```{r}
+n_cores <- detectCores()
+cl <- makeCluster(n_cores - 1)
+registerDoParallel(cl)
+```
+
+```{r load data for classification}
+# tiger <- readxl::read_xls("C:/Users/cfitch/Desktop/OSU/Predictive Analytics/Tiger-7332.xls", sheet = "All Data") %>% data.frame()
+tiger <- readxl::read_xls("~/Desktop/data/Tiger-7332.xls",
+# tiger <- readxl::read_xls("Tiger-7332.xls",                           
+                          sheet = "All Data") %>% 
+  data.frame() %>% 
+  select(-sequence_number) # drop sequence_number column
+
+# convert factor variables to factors 
+non_factor_cols <- c(17:19, 24:25)
+tiger[, -non_factor_cols] <- lapply(tiger[, -non_factor_cols], factor)
+
+training <- tiger %>% 
+  filter(Partition == 't') %>% 
+  select(-Partition)
+
+validation <- tiger %>% 
+  filter(Partition == 'v') %>% 
+  select(-Partition)
+
+test <- tiger %>% 
+  filter(Partition == 's') %>% 
+  select(-Partition)
+```
+
+#### Data Prep for Classification Models
+
+* **We removed the Partition and Spending variables from the datasets because the Partition column is only being used to tell us how to split the main Tiger dataset (Partition removed above). The Spending column we removed (below) because if we are making a prediction for a new customer, we would not know the amount they will spend. We first have to predict if they are going to purchase, then we can predict the amount they will spend, if they do purchase.**
+```{r prep data for classsification}
+# Remove 'spending' variable, change levels of 'purchase' variable
+training <- training %>% 
+  select(-Spending) 
+training$Purchase <- factor(ifelse(training$Purchase == 1, "Yes", "No"), 
+                            levels = c("Yes", "No")) 
+
+validation <- validation %>% 
+    select(-Spending)
+validation$Purchase <- factor(ifelse(validation$Purchase == 1, "Yes", "No"), 
+                              levels = c("Yes", "No")) 
+```
+
+#### Classification Tree Model
+```{r classification tree model}
+set.seed(1)
+# classification Tree
+# Fit the model
+tree_model <- train(Purchase ~ .,
+                    data = training,
+                    method = "rpart",
+                    metric = "ROC",
+                    trControl = trainControl("cv",
+                                             number = 5, #5-fold CV
+                                             summaryFunction = twoClassSummary,
+                                             classProbs = TRUE))
+
+plot(tree_model)
+par(xpd = NA)
+plot(tree_model$finalModel)
+text(tree_model$finalModel, digits = 3)
+
+# Make predictions on the validation set 
+tree_probs <- predict(tree_model, newdata = validation, type = "prob")
+threshold <- 0.5
+tree_preds <- factor(ifelse(tree_probs[, "Yes"] > threshold, "Yes", "No"), 
+                           levels = c("Yes", "No"))
+confusionMatrix(tree_preds, validation$Purchase) 
+
+tree_predictions <- tree_probs[, "Yes"] # save for comparison
+
+colAUC(tree_predictions, validation$Purchase, plotROC = TRUE)
+```
+
+#### Regularized Linear Model
+```{r classification elastic net}
+set.seed(1)
+# Regularized linear model using an elasicnet penalty for shrinkage
+# Fit the model
+enet_model <- train(Purchase ~ ., 
+                      data = training, 
+                      method = "glmnet", 
+                      family="binomial", 
+                      metric="ROC", 
+                      tuneLength = 10,
+                      trControl = trainControl("cv", number = 5, # 5-fold CV
+                                               summaryFunction=twoClassSummary, 
+                                               classProbs = TRUE))
+
+plot(enet_model)
+plot(enet_model$finalModel)
+# alpha and lambda values for best model
+tibble(alpha = enet_model$bestTune$alpha, lambda = enet_model$bestTune$lambda)
+
+# Make predictions on the validation set
+enet_probs <- predict(enet_model, newdata = validation, type = "prob")
+threshold <- 0.5
+enet_preds <- factor(ifelse(enet_probs[, "Yes"] > threshold, "Yes", "No"), 
+                           levels = c("Yes", "No"))
+confusionMatrix(enet_preds, validation$Purchase) 
+
+enet_predictions <- enet_probs[, "Yes"] # save for comparison
+
+colAUC(enet_predictions, validation$Purchase, plotROC = TRUE)
+```
+
+```{r run neural network, include = F}
+set.seed(1)
+nn_model <- train(Purchase ~ ., 
+                  data = training, 
+                  method = "nnet", 
+                  metric="ROC", 
+                  tuneLength = 5, 
+                  maxit=1000,
+                  linout=FALSE,
+                  preProcess = "range",
+                  verbose = FALSE,
+                  trControl = trainControl("cv", number = 5, #5-fold CV
+                                           summaryFunction=twoClassSummary, 
+                                           classProbs = TRUE))
+```
+
+
+#### Neural Network Model
+```{r neural net output for HTML, eval = F}
+set.seed(1)
+nn_model <- train(Purchase ~ ., 
+                  data = training, 
+                  method = "nnet", 
+                  metric="ROC", 
+                  tuneLength = 5, 
+                  maxit=1000,
+                  linout=FALSE,
+                  preProcess = "range",
+                  verbose = FALSE,
+                  trControl = trainControl("cv", number = 5, #5-fold CV
+                                           summaryFunction=twoClassSummary, 
+                                           classProbs = TRUE))
+```
+
+
+```{r neural network classification}
+plot(nn_model)
+
+# Make predictions on the validation set
+nn_probs <- predict(nn_model, newdata = validation, type = "prob")
+threshold <- 0.5
+nn_preds <- factor(ifelse(nn_probs[, "Yes"] > threshold, "Yes", "No"), 
+                           levels = c("Yes", "No"))
+confusionMatrix(nn_preds, validation$Purchase) 
+
+nnet_predictions <- nn_probs[, "Yes"] # save for comparison
+
+colAUC(nnet_predictions, validation$Purchase, plotROC = TRUE)
+```
+
+#### Random Forest Model
+
+```{r rf model}
+grid_train <- expand.grid(mtry = seq(2, 8, 2))
+set.seed(1)
+# Fit the model
+rf_model <- train(Purchase ~ ., 
+                  data = training, 
+                  metric = 'ROC', 
+                  method = 'rf', 
+                  tuneGrid = grid_train,
+                  trControl = trainControl("cv", number = 5, #5-fold CV
+                                           summaryFunction=twoClassSummary, 
+                                           classProbs = TRUE))
+# Plot the model
+plot(rf_model)
+
+# Make predictions on the validation set
+rf_probs <- predict(rf_model, newdata = validation, type = "prob")
+threshold <- 0.5
+rf_preds <- factor(ifelse(rf_probs[, "Yes"] > threshold, "Yes", "No"), 
+                           levels = c("Yes", "No"))
+confusionMatrix(rf_preds, validation$Purchase) 
+
+rf_predictions <- rf_probs[, "Yes"] # save for comparison
+
+colAUC(rf_predictions, validation$Purchase, plotROC = TRUE)
+```
+
+
+### Compare the classification models
+```{r classification model comparisons}
+models <- list(tree = tree_model, 
+               enet = enet_model, 
+               nn = nn_model, 
+               rf = rf_model)
+results <- resamples(models)
+# Look at all comparison values for the models
+summary(results)
+# Compare only area under the ROC curve for the models
+summary(results, metric="ROC")
+# Visualize AUC comparisons
+bwplot(results, metric="ROC")
+
+# ROC curves plotted together
+colAUC(cbind(tree_predictions, enet_predictions, nnet_predictions, rf_predictions), 
+       validation$Purchase, plotROC=TRUE)
+```
+
+Compare Elastic Net and Neural Network classification models
+```{r}
+compare_models(nn_model, enet_model)
+compare_models(rf_model, enet_model)
+```
+
+
+## **Select a Classification Model**
+
+
+* __Based on the estimated generalization error that we see above in the ROC curves plotted together for all the classification models, we selected the Elastic Net (regularized linear model) model as the best model to use for prediction. The elastic net, neural net, and random forest models were the 3 models we were deciding between, because they all had superior AUC compared to the simple tree model, and all 3 were statistically different from the tree model. However, between those 3 candidate models, there was not a statistically difference amongst them. Following *Occam's Razor principle*, we selected the simplest of the 3 candidate models: the elastic net model.__
+
+
+#### Data Prep for REGRESSION (Spending) Models
+
+* **Filtered the training and validation datasets to only Purchasers (Purchase variable = 1) for the Spending regression model building and fine-tuning.**
+```{r load data for regression models}
+# Remove 'spending' variable, change levels of 'purchase' variable
+training <- tiger %>%
+  filter(Partition == 't' & Purchase == 1) %>%  # Purchasers in training data
+  select(-Partition)
+training$Purchase <- factor(ifelse(training$Purchase == 1, "Yes", "No"), 
+                            levels = c("Yes", "No")) 
+
+validation <- tiger %>%
+  filter(Partition == 'v' & Purchase == 1) %>%  # Purchasers in training data
+  select(-Partition)
+validation$Purchase <- factor(ifelse(validation$Purchase == 1, "Yes", "No"), 
+                            levels = c("Yes", "No")) 
+```
+
+#### Regularized Multiple Linear Regression (Elastic Net)
+```{r elasticnet for regression}
+set.seed(1)
+lambda <- 10^seq(-3, 3, length = 100)
+spend_enet_model <- train(Spending ~ .,
+                         data = training, 
+                         method = 'glmnet',
+                         trControl = trainControl("cv", number = 5), #5-fold CV
+                        tuneGrid = expand.grid(alpha = seq(0, 1, by=0.1), 
+                                               lambda = lambda))
+plot(spend_enet_model)
+
+# Coefficients for the best model
+coef(spend_enet_model$finalModel, spend_enet_model$bestTune$lambda)
+
+# best alpha and lambda
+tibble(alpha = spend_enet_model$bestTune$alpha, 
+       lambda = spend_enet_model$bestTune$lambda)
+
+# make predictions on the validation data
+spend_enet_preds <- predict(spend_enet_model, newdata = validation)
+
+# RMSE and R2 values for elasticnet model
+data.frame(
+  RMSE = RMSE(spend_enet_preds, validation$Spending),
+  Rsquare = R2(spend_enet_preds, validation$Spending))
+```
+
+#### Regression Tree
+```{r regression tree model}
+set.seed(1)
+spend_tree_model <- train(Spending ~ .,
+                          data = training, 
+                          method = "rpart",
+                          trControl = trainControl("cv", number = 5), #5-fold CV
+                          tuneGrid = expand.grid(cp=c(0, 0.001, 0.01)))
+
+# complexity parameter for best model
+spend_tree_model$bestTune$cp
+
+# make predictions on the validation set using the regression tree model
+spend_tree_preds <- predict(spend_tree_model, newdata = validation)
+
+# RMSE and R2 values for regression tree
+data.frame(RMSE = RMSE(spend_tree_preds, validation$Spending), 
+           R2 = R2(spend_tree_preds, validation$Spending))
+# plot the regression tree model
+plot(spend_tree_model)
+
+fancyRpartPlot(spend_tree_model$finalModel)
+```
+
+#### Neural Net for Spending (Regression)
+```{r neural network for regression}
+set.seed(1)
+nnetGrid <- expand.grid(.decay = c(0, 0.01, 0.1), 
+                        .size = c(1:10), 
+                        .bag = FALSE)
+spend_nnet_model <- train(Spending ~ .,
+                          data = training, 
+                          method = "avNNet",
+                          trControl = trainControl("cv", number = 5), 
+                          tuneGrid = nnetGrid,
+                          preProc = c("center", "scale"), 
+                          linout = TRUE, 
+                          trace = FALSE, 
+                          maxNWts = 10 * (ncol(training) + 1) + 10 + 1, 
+                          maxit = 500)
+plot(spend_nnet_model)
+
+# Parameters of best model
+data.frame(size = spend_nnet_model$bestTune$size, 
+           decay = spend_nnet_model$bestTune$decay, 
+           bag = spend_nnet_model$bestTune$bag)
+
+# make predictions on the validation set using the regression tree model
+spend_nnet_preds <- predict(spend_nnet_model, newdata = validation)
+
+# RMSE and R2 values
+data.frame(RMSE = RMSE(spend_nnet_preds, validation$Spending),
+           R2 = R2(spend_nnet_preds, validation$Spending))
+```
+
+#### Random Forest Model
+```{r}
+grid_train <- expand.grid(mtry = seq(2, 8, 2))
+set.seed(1)
+spend_rf_model <- train(Spending ~ .,
+                        data = training, 
+                        method = 'rf', 
+                        tuneGrid = grid_train, 
+                        trControl = trainControl("cv", number = 5))
+plot(spend_rf_model)
+
+# Look at the results of different values for mtry
+spend_rf_model$results
+# best tune
+spend_rf_model$bestTune
+
+# make predictions 
+spend_rf_preds <- predict(spend_rf_model, newdata = validation)
+
+# RMSE and R2 values
+data.frame(RMSE = RMSE(spend_rf_preds, validation$Spending),
+           R2 = R2(spend_rf_preds, validation$Spending))
+```
+
+
+### Regression Model Comparisons
+```{r compare regression models}
+models <- list(elastic = spend_enet_model, 
+               nnet = spend_nnet_model, 
+               tree = spend_tree_model, 
+               rf = spend_rf_model)
+results <- resamples(models)
+summary(results)
+summary(results, metric = "RMSE")
+
+bwplot(results, metric = "RMSE") 
+
+regression_results <- data.frame (
+  model = c("elastic", "neural_net", "tree", "rf"),
+  validation_rmse = c(RMSE(predict(spend_enet_model, validation), 
+                    validation$Spending),
+               RMSE(predict(spend_nnet_model, validation), 
+                    validation$Spending),
+               RMSE(predict(spend_tree_model, validation), 
+                    validation$Spending), 
+               RMSE(predict(spend_rf_model, validation), 
+                    validation$Spending)))
+regression_results
+
+compare_models(spend_tree_model, spend_enet_model)
+compare_models(spend_rf_model, spend_nnet_model)
+```
+
+
+### Select a Regression Model
+
+* **When we compare the RMSE values of our regression models, we see that the random forest model and elasticnet model seemingly outperform the other two models.  The random forest model has the lowest mean RMSE and the elasticnet has the lowest median RMSE while the tree model and neural network model both have higher RMSEs.  When we look for a statistical difference between models however, we see that there is none.  In order to remain consistent with our logic from the selection of our classification model, we again rely on _Occam’s Razor principle_ in our decision and select the least complex model for ease of interpretability. Thus, our selected regression model is again the regularized multiple linear regression model, the elasticnet.**
+
+Create score_analysis 
+```{r}
+# create copy of test dataset created
+score_analysis <- test
+score_analysis$Purchase <- factor(ifelse(score_analysis$Purchase == 1, "Yes", "No"),
+                                  levels = c("Yes", "No"))
+```
+
+A. **Score (or copy the scores, the "predictedprobabilityof success"(success = purchase) that were generated in part 1 to this sheet) using the chosen classification model from part 1.**
+```{r}
+# make classification predictions
+purchase_predictions <- predict(enet_model, newdata = score_analysis,
+                                type = "prob")
+
+# add predicted purchase probability on to score_analysis
+score_analysis <- cbind(score_analysis, 
+                        pred_purchase_prob = purchase_predictions[, "Yes"])
+```
+
+B. **Score the cases/observations in this dataset using the chosen prediction model for spending (from part 2 above).**
+
+```{r}
+# make spending (regression) predictions
+spend_predictions <- predict(spend_enet_model, newdata = score_analysis)
+
+# add predicted spending to score_analysis
+score_analysis <- cbind(score_analysis, pred_spending = spend_predictions)
+```
+
+C. **Arrange the following columns so they are adjacent:**
+
+* Predicted probability of purchase (Success)
+* Predicted spending (dollars)
+* Actual spending (dollars)
+
+```{r}
+score_analysis <- score_analysis %>% 
+  select(pred_purchase_prob, pred_spending, Spending, Purchase, everything())
+```
+
+D. **Add a column for "adjusted probability of purchase" by multiplying "predicted probability of purchase" by 0.107.  (This is to adjust for oversampling the purchasers noted above).**
+
+E. **Add a column for expected spending (adjusted probability of purchase X predicted spending).**
+
+F. **Sort all records on the "expected spending" column.**
+
+```{r}
+score_analysis <- score_analysis %>% 
+  mutate(adj_purchase_prob = pred_purchase_prob * 0.107) %>%  # STEP D
+  mutate(expected_spending = adj_purchase_prob * pred_spending) %>% # STEP E
+  select(pred_purchase_prob, pred_spending, Spending, Purchase, 
+         adj_purchase_prob, expected_spending, everything()) %>% # re-arrange columns
+  arrange(-expected_spending) # STEP F
+```
+
+G. **Calculate cumulative lift (cumulative "actual spending" divided by the cumulative average spending that would result from random selection) - note that total spending in the test data partition was $46951 from 500 customers.**
+
+```{r}
+score_analysis <- score_analysis %>% 
+  mutate(cum_actual_spend = cumsum(Spending), 
+         cum_avg_rand_spend = row_number() * (46951 / 500), 
+         cum_lift = cum_actual_spend / cum_avg_rand_spend)
+sum(score_analysis$cum_lift)
+```
+
+H. **Plot the lift chart for your targeting model.**
+
+```{r}
+score_analysis %>% 
+  mutate(n = row_number()) %>% 
+  ggplot() + 
+  geom_line(aes(n, cum_avg_rand_spend), col = 'dodgerblue') + 
+  geom_line(aes(n, cum_actual_spend), col = 'red') + 
+  labs(title = 'Lift Chart', y = NULL) + 
+  theme_light()
+```
+
+
+```{r}
+set.seed(1)
+random_selection <- runif(500)
+lift_calc <- lift(Purchase ~ random_selection + pred_purchase_prob,
+              data = score_analysis)
+lift_calc
+xyplot(lift_calc, auto.key = list(columns = 2), value = c(10, 30))
+xyplot(lift_calc, plot = "lift", auto.key = list(columns = 2))
+```
+
+
+4. Each Catalog costs approximately 2 dollars to mail (including printing, postage and mailing costs).  Estimate the gross profit that the firm could expect from the remaining 180,000 names (prospective customers) if it selected them randomly from the pool.
+
+```{r}
+mailed_to_people <- 180000 * .5
+mailed_to_people
+
+avg_exp_spending <- (46951 / 500)
+avg_exp_spending
+
+mailed_to_purchasers <- mailed_to_people * .053
+mailed_to_purchasers
+
+mailed_to_exp_spending <- mailed_to_purchasers * avg_exp_spending
+mailed_to_exp_spending
+
+mailing_cost <- mailed_to_people * 2
+mailing_cost
+
+random_mailing_gross_profit <- mailed_to_exp_spending - mailing_cost
+random_mailing_gross_profit
+```
+
+**Without any kind of targeting, we assume Tiger Software would randomly mail catalogs to half of the pool which would be 90,000 people.  At a cost of $2/mailing this would cost the company $180,000 in printing, postage and other mailing costs.  From the data provided, we determined average actual spending of purchasers to be $93.90.  With a response rate of approximately 5%, this would yield $447,913 in revenue making gross profit of the randomly sampled mailing for the firm $267,913.**
+
+5. Using the cumulative lift from 3(g), estimate the gross profit that would result from mailing to the 180,000 names selected using your data mining models.  Comment on the value of your modeling effort.
+
+**Tiger Software would see a significant lift in gross profit by leveraging a targeting model such as ours.  Using our model to target people more likely to respond (those with a predicted probability of response greater than 0.5), Tiger Software would send out fewer mailings to people more likely to respond.  Of the pool of 180,000 people they would send mailings to 74,880 people which would cost $149,760.  We determined average estimated spending using the preditions from our regression model of those likely to make a purchase (probability > 0.5) to be $212.15.  Our model has a true positive rate of 36.6%, which means that we correctly identified 27,406 purchasers of the 74,880 people we mailed to yielding $5,814,306 in revenue.  By targeting those more likely to make a purchase using our model Tiger Software would see a gross profit of $5,664,546 over `r floor(5664546 / 267913)` times higher than if they were to use random sampling.**
+
+Customer we mailed to (True Positives and False Positives)
+```{r}
+test_preds <- factor(ifelse(purchase_predictions[,1] > .5, 1, 0), levels = c(0, 1))
+confusion_matrix <- confusionMatrix(test_preds, test$Purchase)
+confusion_matrix <- data.frame(confusion_matrix$table)
+confusion_matrix <- confusion_matrix %>% 
+  mutate(total = sum(Freq), pct = Freq / total)
+confusion_matrix
+
+total_positive_rate <- confusion_matrix %>% 
+  filter(Prediction == 1) %>% 
+  summarise(Positives = sum(pct)) %>%
+  select(Positives) %>% as.numeric()
+total_positive_rate
+
+customers_mailedto <- (total_positive_rate) * 180000
+customers_mailedto
+```
+
+Profitable customers (True Positives)
+```{r}
+true_positive_rate <- confusion_matrix %>% 
+  filter(Prediction == 1 & Reference == 1) %>% 
+  select(pct) %>% as.numeric()
+true_positive_rate
+
+profitable_customers <- (true_positive_rate) * customers_mailedto
+profitable_customers
+```
+
+```{r}
+# average predicted spending per person from our model
+avg_predicted_spending <- score_analysis %>% 
+  filter(pred_purchase_prob > 0.5) %>% # spending predictions for predicted purchasers
+  summarise(mean_pred_spending = mean(pred_spending, na.rm = T)) %>% 
+  as.numeric()
+avg_predicted_spending
+```
+
+Calculate total predicted spending (revenue) 
+```{r}
+(targeted_revenue <- profitable_customers * avg_predicted_spending)
+```
+
+Calculate gross profit
+```{r}
+(total_mailing_cost <- customers_mailedto * 2)
+(targeted_gross_profit <- targeted_revenue - total_mailing_cost)
+```
